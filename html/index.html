@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Media Server</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #121212; color: #e0e0e0; font-family: sans-serif; display: flex; height: 100vh; }
+  #sidebar { width: 300px; min-width: 200px; background: #1e1e1e; overflow-y: auto; border-right: 1px solid #333; }
+  #sidebar h1 { font-size: 1rem; padding: 16px; background: #252525; border-bottom: 1px solid #333; }
+  #list { list-style: none; }
+  #list li { padding: 12px 16px; cursor: pointer; border-bottom: 1px solid #2a2a2a; font-size: 0.85rem; word-break: break-all; }
+  #list li:hover { background: #2a2a2a; }
+  #list li.active { background: #1565c0; }
+  #list li.folder { color: #aaa; font-size: 0.8rem; user-select: none; }
+  #list li.folder:hover { background: #252525; }
+  #list li.sub { padding-left: 28px; }
+  #player-area { flex: 1; display: flex; align-items: center; justify-content: center; background: #000; }
+  video { max-width: 100%; max-height: 100%; }
+  #placeholder { color: #555; font-size: 1.2rem; }
+</style>
+</head>
+<body>
+<div id="sidebar">
+  <h1>Videos</h1>
+  <ul id="list"></ul>
+</div>
+<div id="player-area">
+  <p id="placeholder">動画を選択してください</p>
+  <video id="player" controls style="display:none"></video>
+</div>
+<script>
+  const list = document.getElementById('list');
+  const player = document.getElementById('player');
+  const placeholder = document.getElementById('placeholder');
+
+  let saveTimer = 0;
+  player.addEventListener('timeupdate', () => {
+    const now = Date.now();
+    if (now - saveTimer < 5000) return;
+    saveTimer = now;
+    const file = decodeURIComponent(player.src.split('/videos/')[1] || '');
+    if (!file) return;
+    fetch('/api/progress', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({file, time: player.currentTime})
+    }).catch(() => {});
+  });
+  player.addEventListener('ended', () => {
+    const file = decodeURIComponent(player.src.split('/videos/')[1] || '');
+    if (!file || file.startsWith('視聴済/')) return;
+    fetch('/api/move', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({file})
+    }).then(() => {
+      const active = document.querySelector('#list li.active');
+      if (active) active.remove();
+      player.style.display = 'none';
+      placeholder.style.display = 'block';
+    }).catch(() => {});
+  });
+
+  function makeVideoItem(name, src, sub) {
+    const li = document.createElement('li');
+    if (sub) li.classList.add('sub');
+    li.textContent = name;
+    li.onclick = () => {
+      document.querySelectorAll('#list li').forEach(el => el.classList.remove('active'));
+      li.classList.add('active');
+      player.src = src;
+      player.style.display = 'block';
+      placeholder.style.display = 'none';
+      const file = decodeURIComponent(src.split('/videos/')[1] || '');
+      fetch('/api/progress?file=' + encodeURIComponent(file))
+        .then(r => r.json())
+        .then(d => {
+          if (d.time > 0) player.currentTime = d.time;
+          player.play();
+        })
+        .catch(() => player.play());
+    };
+    return li;
+  }
+
+  fetch('/videos/')
+    .then(r => r.json())
+    .then(files => {
+      const mp4s = files
+        .filter(f => f.type === 'file' && f.name.toLowerCase().endsWith('.mp4'))
+        .sort((a, b) => new Date(b.mtime) - new Date(a.mtime));
+      const hasWatched = files.some(f => f.type === 'directory' && f.name === '視聴済');
+
+      if (mp4s.length === 0 && !hasWatched) {
+        list.innerHTML = '<li style="color:#666">動画がありません</li>';
+        return;
+      }
+
+      mp4s.forEach(f => {
+        list.appendChild(makeVideoItem(f.name, '/videos/' + encodeURIComponent(f.name), false));
+      });
+
+      if (!hasWatched) return;
+
+      const folderLi = document.createElement('li');
+      folderLi.classList.add('folder');
+      folderLi.textContent = '▶ 視聴済';
+      let open = false;
+      let subItems = [];
+
+      folderLi.onclick = () => {
+        if (!open) {
+          open = true;
+          folderLi.textContent = '▼ 視聴済';
+          fetch('/videos/視聴済/')
+            .then(r => r.json())
+            .then(watched => {
+              const wmp4s = watched
+                .filter(f => f.type === 'file' && f.name.toLowerCase().endsWith('.mp4'))
+                .sort((a, b) => new Date(b.mtime) - new Date(a.mtime));
+              wmp4s.forEach(f => {
+                const li = makeVideoItem(f.name, '/videos/' + encodeURIComponent('視聴済') + '/' + encodeURIComponent(f.name), true);
+                subItems.push(li);
+                list.insertBefore(li, folderLi.nextSibling);
+              });
+            })
+            .catch(() => {});
+        } else {
+          open = false;
+          folderLi.textContent = '▶ 視聴済';
+          subItems.forEach(li => li.remove());
+          subItems = [];
+        }
+      };
+
+      list.appendChild(folderLi);
+    })
+    .catch(() => {
+      list.innerHTML = '<li style="color:#f44">読み込み失敗</li>';
+    });
+</script>
+</body>
+</html>
