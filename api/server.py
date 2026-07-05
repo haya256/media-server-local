@@ -70,6 +70,10 @@ class Handler(BaseHTTPRequestHandler):
                 return
             os.makedirs(WATCHED_DIR, exist_ok=True)
             shutil.move(src, os.path.join(WATCHED_DIR, file))
+            srt = os.path.splitext(file)[0] + '.srt'
+            srt_src = os.path.join(VIDEOS_DIR, srt)
+            if os.path.isfile(srt_src):
+                shutil.move(srt_src, os.path.join(WATCHED_DIR, srt))
             data = load()
             data.pop(file, None)
             save(data)

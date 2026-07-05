@@ -8,3 +8,4 @@ pmo/
 
 # 設定ファイル（非公開）
 config/
+__pycache__/

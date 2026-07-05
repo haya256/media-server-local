@@ -19,6 +19,15 @@
   #player-area { flex: 1; display: flex; align-items: center; justify-content: center; background: #000; }
   video { max-width: 100%; max-height: 100%; }
   #placeholder { color: #555; font-size: 1.2rem; }
+  #player-area.audio-mode { flex-direction: column; }
+  #player-area.audio-mode video { width: 100%; max-width: 900px; height: 60px; flex: none; margin-bottom: 16px; }
+  #subtitles { display: none; flex: 1; width: 100%; flex-direction: column; align-items: center; justify-content: center; gap: 28px; padding: 24px; overflow: hidden; }
+  #player-area.audio-mode #subtitles { display: flex; }
+  .cue { text-align: center; max-width: 800px; white-space: pre-line; transition: opacity 0.2s; }
+  .cue.side { opacity: 0.35; font-size: 1rem; line-height: 1.5; min-height: 1.5em; }
+  .cue.side:not(:empty) { cursor: pointer; }
+  .cue.side:not(:empty):hover { opacity: 0.6; }
+  #cue-current { font-size: 1.5rem; line-height: 1.6; min-height: 1.6em; }
 </style>
 </head>
 <body>
@@ -28,12 +37,23 @@
 </div>
 <div id="player-area">
   <p id="placeholder">動画を選択してください</p>
+  <div id="subtitles">
+    <div id="cue-prev" class="cue side"></div>
+    <div id="cue-current" class="cue"></div>
+    <div id="cue-next" class="cue side"></div>
+  </div>
   <video id="player" controls style="display:none"></video>
 </div>
 <script>
   const list = document.getElementById('list');
   const player = document.getElementById('player');
   const placeholder = document.getElementById('placeholder');
+  const playerArea = document.getElementById('player-area');
+  const cuePrevEl = document.getElementById('cue-prev');
+  const cueCurrentEl = document.getElementById('cue-current');
+  const cueNextEl = document.getElementById('cue-next');
+
+  const MEDIA_RE = /\.(mp4|mp3|m4a)$/i;
 
   let saveTimer = 0;
   player.addEventListener('timeupdate', () => {
@@ -58,12 +78,96 @@
     }).then(() => {
       const active = document.querySelector('#list li.active');
       if (active) active.remove();
+      clearSubtitles();
       player.style.display = 'none';
       placeholder.style.display = 'block';
     }).catch(() => {});
   });
 
-  function makeVideoItem(name, src, sub) {
+  // --- 字幕 (SRT) ---
+  let cues = null;
+  let cueIndex = -2; // -2: 未描画(強制更新)、-1: 最初のキューより前
+
+  function parseSrt(text) {
+    const result = [];
+    const timeRe = /(\d{1,2}):(\d{2}):(\d{2})[.,](\d{1,3})\s*-->\s*(\d{1,2}):(\d{2}):(\d{2})[.,](\d{1,3})/;
+    const blocks = text.replace(/^\uFEFF/, '').replace(/\r/g, '').split(/\n\n+/);
+    for (const block of blocks) {
+      const lines = block.split('\n');
+      const ti = lines.findIndex(l => timeRe.test(l));
+      if (ti === -1) continue;
+      const m = lines[ti].match(timeRe);
+      const toSec = (h, mi, s, ms) => (+h) * 3600 + (+mi) * 60 + (+s) + (+ms.padEnd(3, '0')) / 1000;
+      const body = lines.slice(ti + 1).join('\n').replace(/<[^>]+>/g, '').trim();
+      if (!body) continue;
+      result.push({ start: toSec(m[1], m[2], m[3], m[4]), end: toSec(m[5], m[6], m[7], m[8]), text: body });
+    }
+    result.sort((a, b) => a.start - b.start);
+    return result;
+  }
+
+  function clearSubtitles() {
+    cues = null;
+    cueIndex = -2;
+    playerArea.classList.remove('audio-mode');
+    cuePrevEl.textContent = '';
+    cueCurrentEl.textContent = '';
+    cueNextEl.textContent = '';
+  }
+
+  function loadSubtitles(srtUrl) {
+    clearSubtitles();
+    if (!srtUrl) return;
+    playerArea.classList.add('audio-mode');
+    fetch(srtUrl)
+      .then(r => r.text())
+      .then(t => {
+        cues = parseSrt(t);
+        updateCues();
+      })
+      .catch(() => {});
+  }
+
+  function updateCues() {
+    if (!cues || cues.length === 0) return;
+    const t = player.currentTime;
+    // 最後の start <= t のキューを二分探索。キュー間のギャップは直近キューを据え置き表示
+    let lo = 0, hi = cues.length - 1, idx = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (cues[mid].start <= t) { idx = mid; lo = mid + 1; } else { hi = mid - 1; }
+    }
+    if (idx === cueIndex) return;
+    cueIndex = idx;
+    cuePrevEl.textContent = idx > 0 ? cues[idx - 1].text : '';
+    cueCurrentEl.textContent = idx >= 0 ? cues[idx].text : '';
+    cueNextEl.textContent = idx + 1 < cues.length ? cues[idx + 1].text : '';
+  }
+
+  player.addEventListener('timeupdate', updateCues);
+  player.addEventListener('seeked', updateCues);
+  cuePrevEl.onclick = () => {
+    if (cues && cueIndex > 0) player.currentTime = cues[cueIndex - 1].start;
+  };
+  cueNextEl.onclick = () => {
+    if (cues && cueIndex + 1 < cues.length) player.currentTime = cues[cueIndex + 1].start;
+  };
+
+  function buildSrtMap(files, dirUrl) {
+    const map = new Map();
+    files.forEach(f => {
+      if (f.type === 'file' && f.name.toLowerCase().endsWith('.srt')) {
+        map.set(f.name.slice(0, -4).toLowerCase(), dirUrl + encodeURIComponent(f.name));
+      }
+    });
+    return map;
+  }
+
+  function srtFor(map, name) {
+    return map.get(name.replace(/\.[^.]+$/, '').toLowerCase()) || null;
+  }
+
+  function makeVideoItem(name, src, sub, srtUrl) {
     const li = document.createElement('li');
     if (sub) li.classList.add('sub');
     li.textContent = name;
@@ -73,6 +177,7 @@
       player.src = src;
       player.style.display = 'block';
       placeholder.style.display = 'none';
+      loadSubtitles(srtUrl);
       const file = decodeURIComponent(src.split('/videos/')[1] || '');
       fetch('/api/progress?file=' + encodeURIComponent(file))
         .then(r => r.json())
@@ -88,18 +193,19 @@
   fetch('/videos/')
     .then(r => r.json())
     .then(files => {
-      const mp4s = files
-        .filter(f => f.type === 'file' && f.name.toLowerCase().endsWith('.mp4'))
+      const srtMap = buildSrtMap(files, '/videos/');
+      const medias = files
+        .filter(f => f.type === 'file' && MEDIA_RE.test(f.name))
         .sort((a, b) => new Date(b.mtime) - new Date(a.mtime));
       const hasWatched = files.some(f => f.type === 'directory' && f.name === '視聴済');
 
-      if (mp4s.length === 0 && !hasWatched) {
+      if (medias.length === 0 && !hasWatched) {
         list.innerHTML = '<li style="color:#666">動画がありません</li>';
         return;
       }
 
-      mp4s.forEach(f => {
-        list.appendChild(makeVideoItem(f.name, '/videos/' + encodeURIComponent(f.name), false));
+      medias.forEach(f => {
+        list.appendChild(makeVideoItem(f.name, '/videos/' + encodeURIComponent(f.name), false, srtFor(srtMap, f.name)));
       });
 
       if (!hasWatched) return;
@@ -117,11 +223,13 @@
           fetch('/videos/視聴済/')
             .then(r => r.json())
             .then(watched => {
-              const wmp4s = watched
-                .filter(f => f.type === 'file' && f.name.toLowerCase().endsWith('.mp4'))
+              const watchedDir = '/videos/' + encodeURIComponent('視聴済') + '/';
+              const wSrtMap = buildSrtMap(watched, watchedDir);
+              const wMedias = watched
+                .filter(f => f.type === 'file' && MEDIA_RE.test(f.name))
                 .sort((a, b) => new Date(b.mtime) - new Date(a.mtime));
-              wmp4s.forEach(f => {
-                const li = makeVideoItem(f.name, '/videos/' + encodeURIComponent('視聴済') + '/' + encodeURIComponent(f.name), true);
+              wMedias.forEach(f => {
+                const li = makeVideoItem(f.name, watchedDir + encodeURIComponent(f.name), true, srtFor(wSrtMap, f.name));
                 subItems.push(li);
                 list.insertBefore(li, folderLi.nextSibling);
               });
