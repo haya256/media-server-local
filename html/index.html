@@ -84,21 +84,25 @@
     }).catch(() => {});
   });
 
-  // --- 字幕 (SRT) ---
+  // --- 字幕 (SRT / SUB) ---
   let cues = null;
   let cueIndex = -2; // -2: 未描画(強制更新)、-1: 最初のキューより前
 
-  function parseSrt(text) {
+  function parseSubtitle(text) {
     const result = [];
-    const timeRe = /(\d{1,2}):(\d{2}):(\d{2})[.,](\d{1,3})\s*-->\s*(\d{1,2}):(\d{2}):(\d{2})[.,](\d{1,3})/;
+    const srtTimeRe = /(\d{1,2}):(\d{2}):(\d{2})[.,](\d{1,3})\s*-->\s*(\d{1,2}):(\d{2}):(\d{2})[.,](\d{1,3})/;
+    // SUB (SubViewer 系): 「開始,終了」だけの行。小数部 (ms/cs) は省略可
+    const subTimeRe = /^(\d{1,2}):(\d{2}):(\d{2})(?:[.,](\d{1,3}))?,(\d{1,2}):(\d{2}):(\d{2})(?:[.,](\d{1,3}))?$/;
     const blocks = text.replace(/^\uFEFF/, '').replace(/\r/g, '').split(/\n\n+/);
     for (const block of blocks) {
       const lines = block.split('\n');
-      const ti = lines.findIndex(l => timeRe.test(l));
+      const ti = lines.findIndex(l => srtTimeRe.test(l) || subTimeRe.test(l.trim()));
       if (ti === -1) continue;
-      const m = lines[ti].match(timeRe);
-      const toSec = (h, mi, s, ms) => (+h) * 3600 + (+mi) * 60 + (+s) + (+ms.padEnd(3, '0')) / 1000;
-      const body = lines.slice(ti + 1).join('\n').replace(/<[^>]+>/g, '').trim();
+      const m = lines[ti].match(srtTimeRe) || lines[ti].trim().match(subTimeRe);
+      const toSec = (h, mi, s, ms) => (+h) * 3600 + (+mi) * 60 + (+s) + (+(ms || '').padEnd(3, '0')) / 1000;
+      const body = lines.slice(ti + 1)
+        .filter(l => !l.trim().startsWith('>>')) // 「>> 話者名」の行は表示しない
+        .join('\n').replace(/<[^>]+>/g, '').trim();
       if (!body) continue;
       result.push({ start: toSec(m[1], m[2], m[3], m[4]), end: toSec(m[5], m[6], m[7], m[8]), text: body });
     }
@@ -115,14 +119,14 @@
     cueNextEl.textContent = '';
   }
 
-  function loadSubtitles(srtUrl) {
+  function loadSubtitles(subtitleUrl) {
     clearSubtitles();
-    if (!srtUrl) return;
+    if (!subtitleUrl) return;
     playerArea.classList.add('audio-mode');
-    fetch(srtUrl)
+    fetch(subtitleUrl)
       .then(r => r.text())
       .then(t => {
-        cues = parseSrt(t);
+        cues = parseSubtitle(t);
         updateCues();
       })
       .catch(() => {});
@@ -153,21 +157,24 @@
     if (cues && cueIndex + 1 < cues.length) player.currentTime = cues[cueIndex + 1].start;
   };
 
-  function buildSrtMap(files, dirUrl) {
+  function buildSubtitleMap(files, dirUrl) {
     const map = new Map();
-    files.forEach(f => {
-      if (f.type === 'file' && f.name.toLowerCase().endsWith('.srt')) {
-        map.set(f.name.slice(0, -4).toLowerCase(), dirUrl + encodeURIComponent(f.name));
-      }
-    });
+    // .srt を後に処理して、同名の .sub より優先する
+    for (const ext of ['.sub', '.srt']) {
+      files.forEach(f => {
+        if (f.type === 'file' && f.name.toLowerCase().endsWith(ext)) {
+          map.set(f.name.slice(0, -ext.length).toLowerCase(), dirUrl + encodeURIComponent(f.name));
+        }
+      });
+    }
     return map;
   }
 
-  function srtFor(map, name) {
+  function subtitleFor(map, name) {
     return map.get(name.replace(/\.[^.]+$/, '').toLowerCase()) || null;
   }
 
-  function makeVideoItem(name, src, sub, srtUrl) {
+  function makeVideoItem(name, src, sub, subtitleUrl) {
     const li = document.createElement('li');
     if (sub) li.classList.add('sub');
     li.textContent = name;
@@ -177,7 +184,7 @@
       player.src = src;
       player.style.display = 'block';
       placeholder.style.display = 'none';
-      loadSubtitles(srtUrl);
+      loadSubtitles(subtitleUrl);
       const file = decodeURIComponent(src.split('/videos/')[1] || '');
       fetch('/api/progress?file=' + encodeURIComponent(file))
         .then(r => r.json())
@@ -193,7 +200,7 @@
   fetch('/videos/')
     .then(r => r.json())
     .then(files => {
-      const srtMap = buildSrtMap(files, '/videos/');
+      const subMap = buildSubtitleMap(files, '/videos/');
       const medias = files
         .filter(f => f.type === 'file' && MEDIA_RE.test(f.name))
         .sort((a, b) => new Date(b.mtime) - new Date(a.mtime));
@@ -205,7 +212,7 @@
       }
 
       medias.forEach(f => {
-        list.appendChild(makeVideoItem(f.name, '/videos/' + encodeURIComponent(f.name), false, srtFor(srtMap, f.name)));
+        list.appendChild(makeVideoItem(f.name, '/videos/' + encodeURIComponent(f.name), false, subtitleFor(subMap, f.name)));
       });
 
       if (!hasWatched) return;
@@ -224,12 +231,12 @@
             .then(r => r.json())
             .then(watched => {
               const watchedDir = '/videos/' + encodeURIComponent('視聴済') + '/';
-              const wSrtMap = buildSrtMap(watched, watchedDir);
+              const wSubMap = buildSubtitleMap(watched, watchedDir);
               const wMedias = watched
                 .filter(f => f.type === 'file' && MEDIA_RE.test(f.name))
                 .sort((a, b) => new Date(b.mtime) - new Date(a.mtime));
               wMedias.forEach(f => {
-                const li = makeVideoItem(f.name, watchedDir + encodeURIComponent(f.name), true, srtFor(wSrtMap, f.name));
+                const li = makeVideoItem(f.name, watchedDir + encodeURIComponent(f.name), true, subtitleFor(wSubMap, f.name));
                 subItems.push(li);
                 list.insertBefore(li, folderLi.nextSibling);
               });
