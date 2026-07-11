@@ -24,6 +24,8 @@
   #placeholder { color: #555; font-size: 1.2rem; }
   #player-area.audio-mode { flex-direction: column; }
   #player-area.audio-mode video { width: 100%; max-width: 900px; height: 60px; flex: none; margin-bottom: 16px; }
+  audio { width: 100%; max-width: 900px; }
+  #player-area.audio-mode audio { flex: none; margin-bottom: 16px; }
   #subtitles { display: none; flex: 1; width: 100%; flex-direction: column; align-items: center; justify-content: center; gap: 28px; padding: 24px; overflow: hidden; }
   #player-area.audio-mode #subtitles { display: flex; }
   .cue { text-align: center; max-width: 800px; white-space: pre-line; transition: opacity 0.2s; }
@@ -47,6 +49,7 @@
     <div id="cue-next" class="cue side"></div>
   </div>
   <video id="player" controls style="display:none"></video>
+  <audio id="audio-player" controls style="display:none"></audio>
 </div>
 <script>
   const sidebar = document.getElementById('sidebar');
@@ -57,7 +60,9 @@
   };
 
   const list = document.getElementById('list');
-  const player = document.getElementById('player');
+  const videoEl = document.getElementById('player');
+  const audioEl = document.getElementById('audio-player');
+  let player = videoEl; // 再生中のメディア要素(mp4: video / mp3・m4a: audio)
   const placeholder = document.getElementById('placeholder');
   const playerArea = document.getElementById('player-area');
   const cuePrevEl = document.getElementById('cue-prev');
@@ -65,9 +70,10 @@
   const cueNextEl = document.getElementById('cue-next');
 
   const MEDIA_RE = /\.(mp4|mp3|m4a)$/i;
+  const AUDIO_RE = /\.(mp3|m4a)$/i;
 
   let saveTimer = 0;
-  player.addEventListener('timeupdate', () => {
+  function saveProgress() {
     const now = Date.now();
     if (now - saveTimer < 5000) return;
     saveTimer = now;
@@ -78,8 +84,8 @@
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({file, time: player.currentTime})
     }).catch(() => {});
-  });
-  player.addEventListener('ended', () => {
+  }
+  function onMediaEnded() {
     const file = decodeURIComponent(player.src.split('/videos/')[1] || '');
     if (!file || file.startsWith('視聴済/')) return;
     fetch('/api/move', {
@@ -93,7 +99,7 @@
       player.style.display = 'none';
       placeholder.style.display = 'block';
     }).catch(() => {});
-  });
+  }
 
   // --- 字幕 (SRT / SUB) ---
   let cues = null;
@@ -159,8 +165,12 @@
     cueNextEl.textContent = idx + 1 < cues.length ? cues[idx + 1].text : '';
   }
 
-  player.addEventListener('timeupdate', updateCues);
-  player.addEventListener('seeked', updateCues);
+  [videoEl, audioEl].forEach(el => {
+    el.addEventListener('timeupdate', saveProgress);
+    el.addEventListener('ended', onMediaEnded);
+    el.addEventListener('timeupdate', updateCues);
+    el.addEventListener('seeked', updateCues);
+  });
   cuePrevEl.onclick = () => {
     if (cues && cueIndex > 0) player.currentTime = cues[cueIndex - 1].start;
   };
@@ -192,6 +202,9 @@
     li.onclick = () => {
       document.querySelectorAll('#list li').forEach(el => el.classList.remove('active'));
       li.classList.add('active');
+      player.pause();
+      player.style.display = 'none';
+      player = AUDIO_RE.test(name) ? audioEl : videoEl;
       player.src = src;
       player.style.display = 'block';
       placeholder.style.display = 'none';
